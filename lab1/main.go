@@ -39,30 +39,36 @@ func newInfoStruct(group string) (*InfoStruct, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	network := "udp4"
 	if gaddr.IP.To4() == nil {
 		network = "udp6"
-		if gaddr.Zone == "" {
-			ifaces, _ := net.Interfaces()
-			for _, iface := range ifaces {
-				if (iface.Flags&net.FlagUp) != 0 && (iface.Flags&net.FlagMulticast) != 0 {
-					gaddr.Zone = iface.Name
-					break
-				}
-			}
+	}
+	var iface *net.Interface
+	ifaces, _ := net.Interfaces()
+	for _, i := range ifaces {
+		if (i.Flags&net.FlagUp) != 0 && (i.Flags&net.FlagMulticast) != 0 {
+			iface = &i
+			break
 		}
 	}
-	recv, err := net.ListenMulticastUDP(network, nil, gaddr)
-	if err != nil {
-		return nil, err
+	if iface == nil {
+		return nil, fmt.Errorf("no multicast interfaces available")
 	}
-	send, err := net.DialUDP(network, nil, gaddr)
-	if err != nil {
-		return nil, err
-	}
-	id := randomID()
 
-	selfIP := getLocalIP()
+	recv, err := net.ListenMulticastUDP(network, iface, gaddr)
+	if err != nil {
+		return nil, fmt.Errorf("listen multicast: %w", err)
+	}
+
+	localAddr := &net.UDPAddr{IP: ifaceLocalIP(iface), Port: 0}
+	send, err := net.DialUDP(network, localAddr, gaddr)
+	if err != nil {
+		return nil, fmt.Errorf("dial udp: %w", err)
+	}
+
+	id := randomID()
+	selfIP := ifaceLocalIP(iface).String()
 
 	return &InfoStruct{
 		group:       gaddr,
@@ -80,37 +86,35 @@ func randomID() string {
 	return hex.EncodeToString(b)
 }
 
-func getLocalIP() string {
-	addrs, _ := net.InterfaceAddrs()
+func ifaceLocalIP(iface *net.Interface) net.IP {
+	addrs, _ := iface.Addrs()
 	for _, addr := range addrs {
 		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-			if ipnet.IP.To4() != nil {
-				return ipnet.IP.String()
-			}
+			return ipnet.IP
 		}
 	}
-	return localhost
+	return net.ParseIP(localhost)
 }
 
-func (d *InfoStruct) run() {
-	go d.sendConnect()
-	go d.receive()
-	go d.cleanup()
+func (lib *InfoStruct) run() {
+	go lib.sendConnect()
+	go lib.receive()
+	go lib.cleanup()
 }
 
-func (d *InfoStruct) sendConnect() {
+func (lib *InfoStruct) sendConnect() {
 	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
 	for range t.C {
-		msg := []byte("CONNECT:" + d.id)
-		d.sendConn.Write(msg)
+		msg := []byte("CONNECT:" + lib.id)
+		lib.sendConn.Write(msg)
 	}
 }
 
-func (d *InfoStruct) receive() {
+func (lib *InfoStruct) receive() {
 	buf := make([]byte, sizeBuffer)
 	for {
-		n, src, err := d.recvConn.ReadFromUDP(buf)
+		n, src, err := lib.recvConn.ReadFromUDP(buf)
 		if err != nil {
 			continue
 		}
@@ -120,44 +124,44 @@ func (d *InfoStruct) receive() {
 			continue
 		}
 		connectionID := parts[1]
-		if connectionID == d.id {
+		if connectionID == lib.id {
 			continue
 		}
-		d.mu.Lock()
-		d.connections[connectionID] = Connection{ID: connectionID, Addr: src.IP.String(), LastSeen: time.Now()}
-		d.printConnections()
-		d.mu.Unlock()
+		lib.mu.Lock()
+		lib.connections[connectionID] = Connection{ID: connectionID, Addr: src.IP.String(), LastSeen: time.Now()}
+		lib.printConnections()
+		lib.mu.Unlock()
 	}
 }
 
-func (d *InfoStruct) cleanup() {
+func (lib *InfoStruct) cleanup() {
 	t := time.NewTicker(3 * time.Second)
 	defer t.Stop()
 	for range t.C {
 		now := time.Now()
-		d.mu.Lock()
+		lib.mu.Lock()
 		changed := false
-		for id, p := range d.connections {
+		for id, p := range lib.connections {
 			if now.Sub(p.LastSeen) > 6*time.Second {
-				delete(d.connections, id)
+				delete(lib.connections, id)
 				changed = true
 			}
 		}
 		if changed {
-			d.printConnections()
+			lib.printConnections()
 		}
-		d.mu.Unlock()
+		lib.mu.Unlock()
 	}
 }
 
-func (d *InfoStruct) printConnections() {
+func (lib *InfoStruct) printConnections() {
 	fmt.Println("===================================")
-	fmt.Printf("🟢 Myself: %s (%s)\n", d.id, d.selfAddr)
+	fmt.Printf("🟢 Myself: %s (%s)\n", lib.id, lib.selfAddr)
 	fmt.Println("Connections:")
-	if len(d.connections) == 0 {
+	if len(lib.connections) == 0 {
 		fmt.Println("  (none)")
 	} else {
-		for _, p := range d.connections {
+		for _, p := range lib.connections {
 			fmt.Printf("  🔸 %s (%s)\n", p.ID, p.Addr)
 		}
 	}
@@ -171,11 +175,11 @@ func main() {
 		return
 	}
 	group := flag.Arg(0)
-	d, err := newInfoStruct(group)
+	lib, err := newInfoStruct(group)
 	if err != nil {
 		fmt.Println("error:", err)
 		return
 	}
-	d.run()
+	lib.run()
 	select {}
 }
