@@ -7,55 +7,8 @@ import (
 	"io"
 	"net"
 	"os"
-	"path/filepath"
 	"strconv"
-	"unicode/utf8"
 )
-
-type FileInfo struct {
-	Filename string `json:"filename"`
-	Size     int64  `json:"size"`
-}
-
-func validateFilePath(filePath string) (baseName string, size int64, err error) {
-	info, err := os.Stat(filePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", 0, fmt.Errorf("file does not exist: %s", filePath)
-		}
-		return "", 0, fmt.Errorf("file access error: %v", err)
-	}
-	if !info.Mode().IsRegular() {
-		return "", 0, fmt.Errorf("path is not a regular file: %s", filePath)
-	}
-	const maxSize int64 = 1 << 40
-	if info.Size() > maxSize {
-		return "", 0, fmt.Errorf("file size exceeds 1 TB: %d", info.Size())
-	}
-
-	base := filepath.Base(filePath)
-	if !utf8.ValidString(base) {
-		return "", 0, fmt.Errorf("filename is not valid UTF-8: %q", base)
-	}
-	if len([]byte(base)) > 4096 {
-		return "", 0, fmt.Errorf("filename encoded in UTF-8 exceeds 4096 bytes")
-	}
-
-	return base, info.Size(), nil
-}
-
-func parseArgs() (string, string, int, error) {
-	if len(os.Args) != 4 {
-		return "", "", 0, fmt.Errorf("usage: %s <file_path> <server_ip> <server_port>", os.Args[0])
-	}
-	filePath := os.Args[1]
-	ip := os.Args[2]
-	port, err := strconv.Atoi(os.Args[3])
-	if err != nil {
-		return "", "", 0, fmt.Errorf("invalid port: %v", err)
-	}
-	return filePath, ip, port, nil
-}
 
 func Client() {
 	filePath, ip, port, err := parseArgs()
@@ -92,18 +45,6 @@ func Client() {
 		return
 	}
 
-	reader := bufio.NewReader(conn)
-	//response, err := reader.ReadString('\n')
-	//if err != nil {
-	//	fmt.Println("Error reading server response:", err)
-	//	return
-	//}
-	//
-	//if response != "OK\n" {
-	//	fmt.Printf("Server rejected request: %s", response)
-	//	return
-	//}
-
 	file, err := os.Open(filePath)
 	if err != nil {
 		fmt.Println("Error opening file:", err.Error())
@@ -111,10 +52,36 @@ func Client() {
 	}
 	defer file.Close()
 
-	written, err := io.CopyN(conn, file, fileSize)
-	if err != nil {
-		fmt.Printf("Error sending file data: %v (written %d bytes)\n", err, written)
-		return
+	buff := make([]byte, buffSize)
+	var currWritten int64 = 0
+
+	for currWritten < fileSize {
+		remains := fileSize - currWritten
+		nToRead := buffSize
+		if int64(nToRead) > remains {
+			nToRead = int(remains)
+		}
+
+		n, readErr := file.Read(buff[:nToRead])
+		if n > 0 {
+			written := 0
+			for written < n {
+				wn, writeErr := conn.Write(buff[written:n])
+				if writeErr != nil {
+					fmt.Printf("Error sending file: %v (written %d bytes)\n", writeErr, currWritten+int64(written))
+					return
+				}
+				written += wn
+			}
+			currWritten += int64(n)
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			fmt.Printf("Error reading file: %v\n", readErr)
+			return
+		}
 	}
 
 	tcpConn, ok := conn.(*net.TCPConn)
@@ -126,6 +93,7 @@ func Client() {
 		}
 	}
 
+	reader := bufio.NewReader(conn)
 	status, err := reader.ReadString('\n')
 	if err != nil {
 		fmt.Println("Error reading status:", err.Error())
