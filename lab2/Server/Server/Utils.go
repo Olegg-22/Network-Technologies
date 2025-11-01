@@ -18,13 +18,13 @@ func formatSpeed(bps float64) string {
 	)
 	switch {
 	case bps >= GB:
-		return fmt.Sprintf("%.2f GB/s", bps/GB)
+		return fmt.Sprintf("%.2f GB", bps/GB)
 	case bps >= MB:
-		return fmt.Sprintf("%.2f MB/s", bps/MB)
+		return fmt.Sprintf("%.2f MB", bps/MB)
 	case bps >= KB:
-		return fmt.Sprintf("%.2f KB/s", bps/KB)
+		return fmt.Sprintf("%.2f KB", bps/KB)
 	default:
-		return fmt.Sprintf("%.0f B/s", bps)
+		return fmt.Sprintf("%.0f B", bps)
 	}
 }
 

@@ -42,20 +42,21 @@ func handleConn(conn net.Conn) {
 	defer ticker.Stop()
 	done := make(chan struct{})
 
-	go func(remoteAddr string, fileName string) {
+	go func(remoteAddr string, fileInfo FileInfo) {
 		for {
 			select {
 			case tickTime := <-ticker.C:
 				b := atomic.SwapInt64(&bytesSinceLast, 0)
 				inst := float64(b) / tickTime.Sub(lastPrint).Seconds()
 				avg := float64(atomic.LoadInt64(&totalBytes)) / time.Since(startTime).Seconds()
-				fmt.Printf("[%s | %s] Instant: %s, Average: %s\n", remoteAddr, fileName, formatSpeed(inst), formatSpeed(avg))
+				loading := float64(atomic.LoadInt64(&totalBytes)) / float64(fileInfo.Size) * 100
+				fmt.Printf("[%s | %s] Instant: %s/s, Average: %s/s, Loading: %.2f %% \n", remoteAddr, fileInfo.Filename, formatSpeed(inst), formatSpeed(avg), loading)
 				lastPrint = tickTime
 			case <-done:
 				return
 			}
 		}
-	}(conn.RemoteAddr().String(), fileInfo.Filename)
+	}(conn.RemoteAddr().String(), fileInfo)
 
 	buf := make([]byte, buffSize)
 	var receivedBytes int64 = 0
@@ -127,7 +128,7 @@ func handleConn(conn net.Conn) {
 
 	if time.Since(startTime) < 3*time.Second || byteLast > 0 {
 		instantSinceLast := float64(byteLast) / time.Since(lastPrint).Seconds()
-		fmt.Printf("[%s | %s] Instant(final): %s, Average(final): %s\n", conn.RemoteAddr().String(), fileInfo.Filename, formatSpeed(instantSinceLast), formatSpeed(avg))
+		fmt.Printf("[%s | %s] Instant(final): %s/s, Average(final): %s/s\n", conn.RemoteAddr().String(), fileInfo.Filename, formatSpeed(instantSinceLast), formatSpeed(avg))
 	}
 
 	close(done)
@@ -138,7 +139,7 @@ func handleConn(conn net.Conn) {
 			fmt.Println("Error writing to connection:", err.Error())
 		}
 
-		fmt.Printf("File %s received successfully (%d bytes)\n", fileInfo.Filename, total)
+		fmt.Printf("File %s received successfully (%s)\n", fileInfo.Filename, formatSpeed(float64(total)))
 	} else {
 		_, err = conn.Write([]byte("STATUS FAIL\n"))
 		if err != nil {
