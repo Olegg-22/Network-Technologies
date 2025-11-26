@@ -21,6 +21,7 @@ const (
 
 	atypIPv4   = 0x01
 	atypDomain = 0x03
+	atypIPv6   = 0x04
 
 	repSuccess              = 0x00
 	repGeneralFailure       = 0x01
@@ -273,7 +274,7 @@ func tryProcessHandshake(c *Conn) {
 				addr := fmt.Sprintf("%d.%d.%d.%d", b[4], b[5], b[6], b[7])
 				port := int(binary.BigEndian.Uint16(b[8:10]))
 				c.handshake.Next(10)
-				if !startUpstreamConnect(c, addr, port) {
+				if !startUpstreamConnect(c, addr, port, false) {
 					closeConn(c)
 					return
 				}
@@ -301,20 +302,44 @@ func tryProcessHandshake(c *Conn) {
 					return
 				}
 
-				var ipv4 string
+				var chosen = ""
+				var isIPv6 = false
 				for _, ip := range ips {
-					if ip4 := ip.To4(); ip4 != nil {
-						ipv4 = ip4.String()
+					if ip4 := ip.To4(); ip4 != nil && chosen == "" {
+						chosen = ip4.String()
+						isIPv6 = false
 						break
 					}
+					if ip6 := ip.To16(); ip6 != nil && ip.To4() == nil {
+						chosen = ip6.String()
+						isIPv6 = true
+					}
+
 				}
-				if ipv4 == "" {
+
+				if chosen == "" {
 					sendSocksReply(c.clientFD, repGeneralFailure, atypDomain, nil, 0)
 					closeConn(c)
 					return
 				}
 
-				if !startUpstreamConnect(c, ipv4, port) {
+				if !startUpstreamConnect(c, chosen, port, isIPv6) {
+					closeConn(c)
+					return
+				}
+				c.state = StateConnecting
+				return
+			}
+
+			if atyp == atypIPv6 {
+				if c.handshake.Len() < 4+16+2 {
+					return
+				}
+				addrBytes := b[4 : 4+16]
+				port := int(binary.BigEndian.Uint16(b[4+16 : 4+16+2]))
+				c.handshake.Next(4 + 16 + 2)
+				domainOrIP := net.IP(addrBytes).String()
+				if !startUpstreamConnect(c, domainOrIP, port, true) {
 					closeConn(c)
 					return
 				}
@@ -331,43 +356,82 @@ func tryProcessHandshake(c *Conn) {
 	}
 }
 
-func startUpstreamConnect(c *Conn, addr string, port int) bool {
-	upfd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM, 0)
+func startUpstreamConnect(c *Conn, addr string, port int, isIPv6 bool) bool {
+	var upfd int
+	var err error
+
+	if isIPv6 {
+		upfd, err = unix.Socket(unix.AF_INET6, unix.SOCK_STREAM, 0)
+	} else {
+		upfd, err = unix.Socket(unix.AF_INET, unix.SOCK_STREAM, 0)
+	}
+
 	if err != nil {
 		sendSocksReply(c.clientFD, repGeneralFailure, atypIPv4, nil, 0)
 		return false
 	}
+
 	c.upstreamFD = upfd
 	fd2info[upfd] = &FDInfo{conn: c, isClient: false}
-	if err := unix.SetNonblock(upfd, true); err != nil {
+
+	if err = unix.SetNonblock(upfd, true); err != nil {
 		unix.Close(upfd)
 		c.upstreamFD = -1
 		sendSocksReply(c.clientFD, repGeneralFailure, atypIPv4, nil, 0)
 		return false
 	}
 
-	if err := epollAdd(upfd, unix.EPOLLOUT); err != nil {
+	if err = epollAdd(upfd, unix.EPOLLOUT); err != nil {
 		unix.Close(upfd)
 		c.upstreamFD = -1
 		sendSocksReply(c.clientFD, repGeneralFailure, atypIPv4, nil, 0)
 		return false
 	}
-	var sa unix.SockaddrInet4
-	copy(sa.Addr[:], parseIPv4(addr)[:])
-	sa.Port = port
-	if err := unix.Connect(upfd, &sa); err != nil {
-		if errors.Is(err, unix.EINPROGRESS) || errors.Is(err, unix.EALREADY) {
-			return true
+
+	if isIPv6 {
+		ip6 := net.ParseIP(addr).To16()
+		if ip6 == nil {
+			epollDel(upfd)
+			unix.Close(upfd)
+			delete(fd2info, upfd)
+			c.upstreamFD = -1
+			sendSocksReply(c.clientFD, repGeneralFailure, atypIPv6, nil, 0)
+			return false
 		}
-		epollDel(upfd)
-		unix.Close(upfd)
-		delete(fd2info, upfd)
-		c.upstreamFD = -1
-		sendSocksReply(c.clientFD, repGeneralFailure, atypIPv4, nil, 0)
-		return false
+		var sa unix.SockaddrInet6
+		copy(sa.Addr[:], ip6)
+		sa.Port = port
+		if err = unix.Connect(upfd, &sa); err != nil {
+			if errors.Is(err, unix.EINPROGRESS) || errors.Is(err, unix.EALREADY) {
+				return true
+			}
+			epollDel(upfd)
+			unix.Close(upfd)
+			delete(fd2info, upfd)
+			c.upstreamFD = -1
+			sendSocksReply(c.clientFD, repGeneralFailure, atypIPv6, nil, 0)
+			return false
+		}
+		handleUpstreamWrite(c)
+		return true
+	} else {
+		var sa unix.SockaddrInet4
+		copy(sa.Addr[:], parseIPv4(addr)[:])
+		sa.Port = port
+		if err = unix.Connect(upfd, &sa); err != nil {
+			if errors.Is(err, unix.EINPROGRESS) || errors.Is(err, unix.EALREADY) {
+				return true
+			}
+			epollDel(upfd)
+			unix.Close(upfd)
+			delete(fd2info, upfd)
+			c.upstreamFD = -1
+			sendSocksReply(c.clientFD, repGeneralFailure, atypIPv4, nil, 0)
+			return false
+		}
+		handleUpstreamWrite(c)
+		return true
 	}
-	handleUpstreamWrite(c)
-	return true
 }
 
 func handleUpstreamWrite(c *Conn) {
@@ -382,9 +446,17 @@ func handleUpstreamWrite(c *Conn) {
 			closeConn(c)
 			return
 		}
-		if !sendSocksReply(c.clientFD, repSuccess, atypIPv4, []byte{0, 0, 0, 0}, 0) {
-			closeConn(c)
-			return
+		sa, err := unix.Getsockname(c.upstreamFD)
+		if _, isIPv6 := sa.(*unix.SockaddrInet6); isIPv6 {
+			if !sendSocksReply(c.clientFD, repSuccess, atypIPv6, make([]byte, 16), 0) {
+				closeConn(c)
+				return
+			}
+		} else {
+			if !sendSocksReply(c.clientFD, repSuccess, atypIPv4, []byte{0, 0, 0, 0}, 0) {
+				closeConn(c)
+				return
+			}
 		}
 		_ = epollMod(upfd, unix.EPOLLIN)
 		_ = epollMod(c.clientFD, unix.EPOLLIN)
