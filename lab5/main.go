@@ -138,6 +138,10 @@ func main() {
 			}
 
 			info := fd2info[fd]
+			if info == nil {
+				delete(fd2info, fd)
+				continue
+			}
 			if ev.Events&(unix.EPOLLHUP|unix.EPOLLERR) != 0 {
 				closeConn(info.conn)
 				continue
@@ -376,6 +380,7 @@ func startUpstreamConnect(c *Conn, addr string, port int, isIPv6 bool) bool {
 
 	if err = unix.SetNonblock(upfd, true); err != nil {
 		unix.Close(upfd)
+		delete(fd2info, upfd)
 		c.upstreamFD = -1
 		sendSocksReply(c.clientFD, repGeneralFailure, atypIPv4, nil, 0)
 		return false
@@ -383,6 +388,7 @@ func startUpstreamConnect(c *Conn, addr string, port int, isIPv6 bool) bool {
 
 	if err = epollAdd(upfd, unix.EPOLLOUT); err != nil {
 		unix.Close(upfd)
+		delete(fd2info, upfd)
 		c.upstreamFD = -1
 		sendSocksReply(c.clientFD, repGeneralFailure, atypIPv4, nil, 0)
 		return false
