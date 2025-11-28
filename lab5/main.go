@@ -5,9 +5,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
+	"math/rand"
 	"net"
 	"os"
 	"strconv"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -34,6 +37,7 @@ const (
 	StateRequest    = 1
 	StateConnecting = 2
 	StateRelaying   = 3
+	StateResolving  = 4
 )
 
 type Conn struct {
@@ -55,10 +59,19 @@ type FDInfo struct {
 	isClient bool
 }
 
+type pendingResolve struct {
+	conn   *Conn
+	domain string
+	port   int
+}
+
 var (
-	epfd    int
-	fd2info = make(map[int]*FDInfo)
-	conns   = make(map[int]*Conn)
+	epfd            int
+	fd2info             = make(map[int]*FDInfo)
+	conns               = make(map[int]*Conn)
+	dnsFD           int = -1
+	pendingResolves     = make(map[uint16]*pendingResolve)
+	dnsResolverAddr     = &unix.SockaddrInet4{Port: 53, Addr: [4]byte{8, 8, 8, 8}}
 )
 
 func epollAdd(fd int, events uint32) error {
@@ -72,6 +85,8 @@ func epollMod(fd int, events uint32) error {
 func epollDel(fd int) { _ = unix.EpollCtl(epfd, unix.EPOLL_CTL_DEL, fd, nil) }
 
 func main() {
+	rand.Seed(time.Now().UnixNano())
+
 	if len(os.Args) != 2 {
 		fmt.Println("Usage: go run ./main.go <port>")
 		return
@@ -84,36 +99,69 @@ func main() {
 
 	lnFD, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM, 0)
 	if err != nil {
-		fmt.Printf("socket: %v\n", err)
+		fmt.Printf("socket faile: %v\n", err)
 		return
 	}
-	defer unix.Close(lnFD)
+	defer func(fd int) {
+		err := unix.Close(fd)
+		if err != nil {
+			log.Printf("close(%d) faile: %v", fd, err)
+		}
+	}(lnFD)
+
 	_ = unix.SetsockoptInt(lnFD, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
 	if err := unix.SetNonblock(lnFD, true); err != nil {
-		fmt.Printf("setnonblock: %v\n", err)
+		fmt.Printf("setnonblock faile: %v\n", err)
 		return
 	}
 	sa := &unix.SockaddrInet4{Port: port}
 	copy(sa.Addr[:], []byte{0, 0, 0, 0})
 	if err := unix.Bind(lnFD, sa); err != nil {
-		fmt.Printf("bind: %v\n", err)
+		fmt.Printf("bind faile: %v\n", err)
 		return
 	}
 	if err := unix.Listen(lnFD, 128); err != nil {
-		fmt.Printf("listen: %v\n", err)
+		fmt.Printf("listen faile: %v\n", err)
 		return
 	}
 	fmt.Printf("listening on :%d\n", port)
 
 	epfd, err = unix.EpollCreate1(0)
 	if err != nil {
-		fmt.Printf("epoll_create1: %v\n", err)
+		fmt.Printf("epoll_create1 faile: %v\n", err)
 		return
 	}
-	defer unix.Close(epfd)
+	defer func(fd int) {
+		err := unix.Close(fd)
+		if err != nil {
+			log.Printf("close(%d) faile: %v", fd, err)
+		}
+	}(epfd)
 
 	if err := epollAdd(lnFD, unix.EPOLLIN); err != nil {
-		fmt.Printf("epoll add listen: %v\n", err)
+		fmt.Printf("epoll add listen faile: %v\n", err)
+		return
+	}
+
+	dnsFD, err = unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
+	if err != nil {
+		fmt.Printf("dns socket faile: %v\n", err)
+		return
+	}
+	defer func(fd int) {
+		if fd > 0 {
+			err := unix.Close(fd)
+			if err != nil {
+				log.Printf("close(%d) faile: %v", fd, err)
+			}
+		}
+	}(dnsFD)
+	if err := unix.SetNonblock(dnsFD, true); err != nil {
+		fmt.Printf("dns setnonblock faile: %v\n", err)
+		return
+	}
+	if err := epollAdd(dnsFD, unix.EPOLLIN); err != nil {
+		fmt.Printf("epoll add dns faile: %v\n", err)
 		return
 	}
 
@@ -133,6 +181,13 @@ func main() {
 			if fd == lnFD {
 				if ev.Events&unix.EPOLLIN != 0 {
 					acceptLoop(lnFD)
+				}
+				continue
+			}
+
+			if fd == dnsFD {
+				if ev.Events&unix.EPOLLIN != 0 {
+					handleDNSRead()
 				}
 				continue
 			}
@@ -179,9 +234,12 @@ func acceptLoop(ln int) {
 		c := &Conn{clientFD: nfd, upstreamFD: -1, state: StateGreeting}
 		conns[nfd] = c
 		fd2info[nfd] = &FDInfo{conn: c, isClient: true}
-		if err := epollAdd(nfd, unix.EPOLLIN); err != nil {
+		if err = epollAdd(nfd, unix.EPOLLIN); err != nil {
 			fmt.Printf("epoll add client: %v\n", err)
-			unix.Close(nfd)
+			err = unix.Close(nfd)
+			if err != nil {
+				log.Printf("close(%d) faile: %v", nfd, err)
+			}
 			delete(conns, nfd)
 			delete(fd2info, nfd)
 			continue
@@ -299,39 +357,14 @@ func tryProcessHandshake(c *Conn) {
 
 				c.handshake.Next(5 + dlen + 2)
 
-				ips, err := net.LookupIP(domain)
+				pr := &pendingResolve{conn: c, domain: domain, port: port}
+				_, err := sendDNSQuery(domain, pr)
 				if err != nil {
 					sendSocksReply(c.clientFD, repGeneralFailure, atypDomain, nil, 0)
 					closeConn(c)
 					return
 				}
-
-				var chosen = ""
-				var isIPv6 = false
-				for _, ip := range ips {
-					if ip4 := ip.To4(); ip4 != nil && chosen == "" {
-						chosen = ip4.String()
-						isIPv6 = false
-						break
-					}
-					if ip6 := ip.To16(); ip6 != nil && ip.To4() == nil {
-						chosen = ip6.String()
-						isIPv6 = true
-					}
-
-				}
-
-				if chosen == "" {
-					sendSocksReply(c.clientFD, repGeneralFailure, atypDomain, nil, 0)
-					closeConn(c)
-					return
-				}
-
-				if !startUpstreamConnect(c, chosen, port, isIPv6) {
-					closeConn(c)
-					return
-				}
-				c.state = StateConnecting
+				c.state = StateResolving
 				return
 			}
 
@@ -379,7 +412,10 @@ func startUpstreamConnect(c *Conn, addr string, port int, isIPv6 bool) bool {
 	fd2info[upfd] = &FDInfo{conn: c, isClient: false}
 
 	if err = unix.SetNonblock(upfd, true); err != nil {
-		unix.Close(upfd)
+		err = unix.Close(upfd)
+		if err != nil {
+			log.Printf("close(%d) faile: %v", upfd, err)
+		}
 		delete(fd2info, upfd)
 		c.upstreamFD = -1
 		sendSocksReply(c.clientFD, repGeneralFailure, atypIPv4, nil, 0)
@@ -387,7 +423,10 @@ func startUpstreamConnect(c *Conn, addr string, port int, isIPv6 bool) bool {
 	}
 
 	if err = epollAdd(upfd, unix.EPOLLOUT); err != nil {
-		unix.Close(upfd)
+		err = unix.Close(upfd)
+		if err != nil {
+			log.Printf("close(%d) faile: %v", upfd, err)
+		}
 		delete(fd2info, upfd)
 		c.upstreamFD = -1
 		sendSocksReply(c.clientFD, repGeneralFailure, atypIPv4, nil, 0)
@@ -398,7 +437,10 @@ func startUpstreamConnect(c *Conn, addr string, port int, isIPv6 bool) bool {
 		ip6 := net.ParseIP(addr).To16()
 		if ip6 == nil {
 			epollDel(upfd)
-			unix.Close(upfd)
+			err = unix.Close(upfd)
+			if err != nil {
+				log.Printf("close(%d) faile: %v", upfd, err)
+			}
 			delete(fd2info, upfd)
 			c.upstreamFD = -1
 			sendSocksReply(c.clientFD, repGeneralFailure, atypIPv6, nil, 0)
@@ -412,7 +454,10 @@ func startUpstreamConnect(c *Conn, addr string, port int, isIPv6 bool) bool {
 				return true
 			}
 			epollDel(upfd)
-			unix.Close(upfd)
+			err = unix.Close(upfd)
+			if err != nil {
+				log.Printf("close(%d) faile: %v", upfd, err)
+			}
 			delete(fd2info, upfd)
 			c.upstreamFD = -1
 			sendSocksReply(c.clientFD, repGeneralFailure, atypIPv6, nil, 0)
@@ -429,7 +474,10 @@ func startUpstreamConnect(c *Conn, addr string, port int, isIPv6 bool) bool {
 				return true
 			}
 			epollDel(upfd)
-			unix.Close(upfd)
+			err = unix.Close(upfd)
+			if err != nil {
+				log.Printf("close(%d) faile: %v", upfd, err)
+			}
 			delete(fd2info, upfd)
 			c.upstreamFD = -1
 			sendSocksReply(c.clientFD, repGeneralFailure, atypIPv4, nil, 0)
@@ -453,6 +501,11 @@ func handleUpstreamWrite(c *Conn) {
 			return
 		}
 		sa, err := unix.Getsockname(c.upstreamFD)
+		if err != nil {
+			sendSocksReply(c.clientFD, repGeneralFailure, atypIPv4, nil, 0)
+			closeConn(c)
+			return
+		}
 		if _, isIPv6 := sa.(*unix.SockaddrInet6); isIPv6 {
 			if !sendSocksReply(c.clientFD, repSuccess, atypIPv6, make([]byte, 16), 0) {
 				closeConn(c)
@@ -594,21 +647,191 @@ func closeConn(c *Conn) {
 	}
 	if c.clientFD >= 0 {
 		epollDel(c.clientFD)
-		unix.Close(c.clientFD)
+		err := unix.Close(c.clientFD)
+		if err != nil {
+			log.Printf("close(%d) faile: %v", c.clientFD, err)
+		}
 		delete(fd2info, c.clientFD)
 		delete(conns, c.clientFD)
 		c.clientFD = -1
 	}
 	if c.upstreamFD >= 0 {
 		epollDel(c.upstreamFD)
-		unix.Close(c.upstreamFD)
+		err := unix.Close(c.upstreamFD)
+		if err != nil {
+			log.Printf("close(%d) faile: %v", c.upstreamFD, err)
+		}
 		delete(fd2info, c.upstreamFD)
 		c.upstreamFD = -1
 	}
 }
 
+func buildDNSQuery(id uint16, name string) ([]byte, error) {
+	dnsQuery := &bytes.Buffer{}
+	_ = binary.Write(dnsQuery, binary.BigEndian, id)
+	_ = binary.Write(dnsQuery, binary.BigEndian, uint16(0x0100))
+	_ = binary.Write(dnsQuery, binary.BigEndian, uint16(1))
+	_ = binary.Write(dnsQuery, binary.BigEndian, uint16(0))
+	_ = binary.Write(dnsQuery, binary.BigEndian, uint16(0))
+	_ = binary.Write(dnsQuery, binary.BigEndian, uint16(0))
+
+	for _, label := range bytes.Split([]byte(name), []byte{'.'}) {
+		if len(label) == 0 || len(label) > 63 {
+			return nil, fmt.Errorf("invalid dns name")
+		}
+		dnsQuery.WriteByte(byte(len(label)))
+		dnsQuery.Write(label)
+	}
+	dnsQuery.WriteByte(0)
+	_ = binary.Write(dnsQuery, binary.BigEndian, uint16(1))
+	_ = binary.Write(dnsQuery, binary.BigEndian, uint16(1))
+	return dnsQuery.Bytes(), nil
+}
+
+func parseDNSResponse(dnsResponse []byte) (uint16, string, error) {
+	if len(dnsResponse) < 12 {
+		return 0, "", fmt.Errorf("short dns response")
+	}
+	id := binary.BigEndian.Uint16(dnsResponse[0:2])
+	flags := binary.BigEndian.Uint16(dnsResponse[2:4])
+	if (flags>>15)&1 == 0 {
+		return id, "", fmt.Errorf("not a response")
+	}
+	rcode := flags & 0xF
+	if rcode != 0 {
+		return id, "", fmt.Errorf("rcode=%d", rcode)
+	}
+	qdcount := int(binary.BigEndian.Uint16(dnsResponse[4:6]))
+	ancount := int(binary.BigEndian.Uint16(dnsResponse[6:8]))
+	off := 12
+	for i := 0; i < qdcount; i++ {
+		for {
+			if off >= len(dnsResponse) {
+				return id, "", fmt.Errorf("uncorrect response")
+			}
+			l := int(dnsResponse[off])
+			off++
+			if l == 0 {
+				break
+			}
+			off += l
+		}
+		off += 4
+	}
+	for i := 0; i < ancount; i++ {
+		if off+10 > len(dnsResponse) {
+			return id, "", fmt.Errorf("short answer")
+		}
+		if dnsResponse[off]&0xC0 == 0xC0 {
+			off += 2
+		} else {
+			for {
+				if off >= len(dnsResponse) {
+					return id, "", fmt.Errorf("uncorrect answer name")
+				}
+				l := int(dnsResponse[off])
+				off++
+				if l == 0 {
+					break
+				}
+				off += l
+			}
+		}
+		typ := binary.BigEndian.Uint16(dnsResponse[off : off+2])
+		off += 2
+		class := binary.BigEndian.Uint16(dnsResponse[off : off+2])
+		off += 2 + 4
+		rdlen := int(binary.BigEndian.Uint16(dnsResponse[off : off+2]))
+		off += 2
+		if off+rdlen > len(dnsResponse) {
+			return id, "", fmt.Errorf("rdata out of bounds")
+		}
+		rdata := dnsResponse[off : off+rdlen]
+		off += rdlen
+		if typ == 1 && class == 1 && rdlen == 4 {
+			ip := net.IPv4(rdata[0], rdata[1], rdata[2], rdata[3]).String()
+			return id, ip, nil
+		}
+	}
+	return id, "", fmt.Errorf("no A record found")
+}
+
+func sendDNSQuery(domain string, p *pendingResolve) (uint16, error) {
+	var id uint16
+	for tries := 0; tries < 10; tries++ {
+		id = uint16(rand.Intn(0xffff))
+		if _, exists := pendingResolves[id]; !exists {
+			break
+		}
+		if tries == 9 {
+			return 0, fmt.Errorf("faile to find free dns id")
+		}
+	}
+
+	dnsQuery, err := buildDNSQuery(id, domain)
+	if err != nil {
+		return 0, err
+	}
+
+	if err := unix.Sendto(dnsFD, dnsQuery, 0, dnsResolverAddr); err != nil {
+		return 0, err
+	}
+
+	pendingResolves[id] = p
+	return id, nil
+}
+
+func handleDNSRead() {
+	buf := make([]byte, 4*1024)
+	for {
+		n, _, err := unix.Recvfrom(dnsFD, buf, 0)
+		if err != nil {
+			if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
+				return
+			}
+			fmt.Printf("dns recvfrom: %v\n", err)
+			return
+		}
+		if n == 0 {
+			return
+		}
+
+		id, ipStr, err := parseDNSResponse(buf[:n])
+		if err != nil {
+			fmt.Printf("dns parse err: %v\n", err)
+			continue
+		}
+
+		pendingRequest := pendingResolves[id]
+		if pendingRequest == nil {
+			continue
+		}
+		delete(pendingResolves, id)
+
+		ip := net.ParseIP(ipStr)
+		if ip == nil {
+			sendSocksReply(pendingRequest.conn.clientFD, repGeneralFailure, atypDomain, nil, 0)
+			closeConn(pendingRequest.conn)
+			continue
+		}
+		isIPv6 := false
+		if ip.To4() == nil {
+			isIPv6 = true
+		}
+
+		if !startUpstreamConnect(pendingRequest.conn, ipStr, pendingRequest.port, isIPv6) {
+			closeConn(pendingRequest.conn)
+			continue
+		}
+		pendingRequest.conn.state = StateConnecting
+	}
+}
+
 func parseIPv4(s string) []byte {
 	var a, b, c, d int
-	fmt.Sscanf(s, "%d.%d.%d.%d", &a, &b, &c, &d)
+	_, err := fmt.Sscanf(s, "%d.%d.%d.%d", &a, &b, &c, &d)
+	if err != nil {
+		log.Printf("sscanf faile: %v", err)
+	}
 	return []byte{byte(a), byte(b), byte(c), byte(d)}
 }
