@@ -107,8 +107,8 @@ func TryProcessHandshake(conn *data.Conn) {
 				addrBytes := b[4 : 4+16]
 				port := int(binary.BigEndian.Uint16(b[4+16 : 4+16+2]))
 				conn.HandshakeBuffer.Next(4 + 16 + 2)
-				domainOrIP := net.IP(addrBytes).String()
-				if !connect.StartUpstreamConnect(conn, domainOrIP, port, true) {
+				addr := net.IP(addrBytes).String()
+				if !connect.StartUpstreamConnect(conn, addr, port, true) {
 					utils.CloseConn(conn)
 					return
 				}
