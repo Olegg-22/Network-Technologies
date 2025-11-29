@@ -17,16 +17,16 @@ func TryProcessHandshake(conn *data.Conn) {
 			if conn.HandshakeBuffer.Len() < 2 {
 				return
 			}
-			b := conn.HandshakeBuffer.Bytes()
-			if b[0] != data.SocksVer {
+			handshakeBuffer := conn.HandshakeBuffer.Bytes()
+			if handshakeBuffer[0] != data.SocksVer {
 				utils.CloseConn(conn)
 				return
 			}
-			nm := int(b[1])
+			nm := int(handshakeBuffer[1])
 			if conn.HandshakeBuffer.Len() < 2+nm {
 				return
 			}
-			methods := b[2 : 2+nm]
+			methods := handshakeBuffer[2 : 2+nm]
 			ok := false
 			for _, m := range methods {
 				if m == data.SocksMethodNoAuth {
@@ -49,13 +49,13 @@ func TryProcessHandshake(conn *data.Conn) {
 			if conn.HandshakeBuffer.Len() < 4 {
 				return
 			}
-			b := conn.HandshakeBuffer.Bytes()
-			if b[0] != data.SocksVer {
+			handshakeBuffer := conn.HandshakeBuffer.Bytes()
+			if handshakeBuffer[0] != data.SocksVer {
 				utils.CloseConn(conn)
 				return
 			}
-			cmd := b[1]
-			atyp := b[3]
+			cmd := handshakeBuffer[1]
+			atyp := handshakeBuffer[3]
 			if cmd != data.SocksCmdConnect {
 				utils.SendSocksReply(conn.ClientFD, data.RepCommandNotSupported, atyp, nil, 0)
 				utils.CloseConn(conn)
@@ -65,8 +65,8 @@ func TryProcessHandshake(conn *data.Conn) {
 				if conn.HandshakeBuffer.Len() < 10 {
 					return
 				}
-				addr := fmt.Sprintf("%d.%d.%d.%d", b[4], b[5], b[6], b[7])
-				port := int(binary.BigEndian.Uint16(b[8:10]))
+				addr := fmt.Sprintf("%d.%d.%d.%d", handshakeBuffer[4], handshakeBuffer[5], handshakeBuffer[6], handshakeBuffer[7])
+				port := int(binary.BigEndian.Uint16(handshakeBuffer[8:10]))
 				conn.HandshakeBuffer.Next(10)
 				if !connect.StartUpstreamConnect(conn, addr, port, false) {
 					utils.CloseConn(conn)
@@ -80,12 +80,12 @@ func TryProcessHandshake(conn *data.Conn) {
 				if conn.HandshakeBuffer.Len() < 5 {
 					return
 				}
-				dlen := int(b[4])
+				dlen := int(handshakeBuffer[4])
 				if conn.HandshakeBuffer.Len() < 5+dlen+2 {
 					return
 				}
-				domain := string(b[5 : 5+dlen])
-				port := int(binary.BigEndian.Uint16(b[5+dlen : 5+dlen+2]))
+				domain := string(handshakeBuffer[5 : 5+dlen])
+				port := int(binary.BigEndian.Uint16(handshakeBuffer[5+dlen : 5+dlen+2]))
 
 				conn.HandshakeBuffer.Next(5 + dlen + 2)
 
@@ -104,8 +104,8 @@ func TryProcessHandshake(conn *data.Conn) {
 				if conn.HandshakeBuffer.Len() < 4+16+2 {
 					return
 				}
-				addrBytes := b[4 : 4+16]
-				port := int(binary.BigEndian.Uint16(b[4+16 : 4+16+2]))
+				addrBytes := handshakeBuffer[4 : 4+16]
+				port := int(binary.BigEndian.Uint16(handshakeBuffer[4+16 : 4+16+2]))
 				conn.HandshakeBuffer.Next(4 + 16 + 2)
 				addr := net.IP(addrBytes).String()
 				if !connect.StartUpstreamConnect(conn, addr, port, true) {
