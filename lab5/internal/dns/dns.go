@@ -158,7 +158,7 @@ func HandleDNSRead() {
 
 		id, ipStr, err := parseDNSResponse(buf[:n])
 		if err != nil {
-			fmt.Printf("dns parse err: %v\n", err)
+			//fmt.Printf("dns parse err: %v\n", err)
 			continue
 		}
 
