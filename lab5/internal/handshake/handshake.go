@@ -10,84 +10,131 @@ import (
 	"net"
 )
 
+const (
+	greetingHeaderSize = 2
+	requestMinSize     = 4
+	ipv4AddrSize       = 4
+	ipv6AddrSize       = 16
+	portSize           = 2
+	ipv4RequestSize    = 10
+
+	versionOffset      = 0
+	methodsCountOffset = 1
+	methodsStartOffset = 2
+	commandOffset      = 1
+	addressTypeOffset  = 3
+	domainLenOffset    = 4
+	domainStartOffset  = 5
+)
+
 func TryProcessHandshake(conn *data.Conn) {
 	for {
 		switch conn.State {
 		case data.StateGreeting:
-			if conn.HandshakeBuffer.Len() < 2 {
+			if conn.HandshakeBuffer.Len() < greetingHeaderSize {
 				return
 			}
+
 			handshakeBuffer := conn.HandshakeBuffer.Bytes()
-			if handshakeBuffer[0] != data.SocksVer {
+			if handshakeBuffer[versionOffset] != data.SocksVer {
 				utils.CloseConn(conn)
 				return
 			}
-			nm := int(handshakeBuffer[1])
-			if conn.HandshakeBuffer.Len() < 2+nm {
+
+			methodsCount := int(handshakeBuffer[methodsCountOffset])
+
+			if conn.HandshakeBuffer.Len() < greetingHeaderSize+methodsCount {
 				return
 			}
-			methods := handshakeBuffer[2 : 2+nm]
-			ok := false
-			for _, m := range methods {
-				if m == data.SocksMethodNoAuth {
-					ok = true
+
+			methods := handshakeBuffer[methodsStartOffset : methodsStartOffset+methodsCount]
+
+			noAuthSupported := false
+			for _, method := range methods {
+				if method == data.SocksMethodNoAuth {
+					noAuthSupported = true
 					break
 				}
 			}
-			conn.HandshakeBuffer.Next(2 + nm)
+			conn.HandshakeBuffer.Next(greetingHeaderSize + methodsCount)
 
 			if !utils.WriteAll(conn.ClientFD, []byte{data.SocksVer, data.SocksMethodNoAuth}) {
 				utils.CloseConn(conn)
 				return
 			}
-			if !ok {
+
+			if !noAuthSupported {
 				utils.CloseConn(conn)
 				return
 			}
+
 			conn.State = data.StateRequest
+
 		case data.StateRequest:
-			if conn.HandshakeBuffer.Len() < 4 {
+			if conn.HandshakeBuffer.Len() < requestMinSize {
 				return
 			}
+
 			handshakeBuffer := conn.HandshakeBuffer.Bytes()
-			if handshakeBuffer[0] != data.SocksVer {
+			if handshakeBuffer[versionOffset] != data.SocksVer {
 				utils.CloseConn(conn)
 				return
 			}
-			cmd := handshakeBuffer[1]
-			atyp := handshakeBuffer[3]
-			if cmd != data.SocksCmdConnect {
-				utils.SendSocksReply(conn.ClientFD, data.RepCommandNotSupported, atyp, nil, 0)
+
+			command := handshakeBuffer[commandOffset]
+			addressType := handshakeBuffer[addressTypeOffset]
+
+			if command != data.SocksCmdConnect {
+				utils.SendSocksReply(conn.ClientFD, data.RepCommandNotSupported, addressType, nil, 0)
 				utils.CloseConn(conn)
 				return
 			}
-			if atyp == data.AtypIPv4 {
-				if conn.HandshakeBuffer.Len() < 10 {
+			if addressType == data.AtypIPv4 {
+				if conn.HandshakeBuffer.Len() < ipv4RequestSize {
 					return
 				}
-				addr := fmt.Sprintf("%d.%d.%d.%d", handshakeBuffer[4], handshakeBuffer[5], handshakeBuffer[6], handshakeBuffer[7])
-				port := int(binary.BigEndian.Uint16(handshakeBuffer[8:10]))
-				conn.HandshakeBuffer.Next(10)
+
+				ipStart := addressTypeOffset + 1
+				ipEnd := ipStart + ipv4AddrSize
+				portStart := ipEnd
+				portEnd := portStart + portSize
+
+				addr := fmt.Sprintf("%d.%d.%d.%d",
+					handshakeBuffer[ipStart],
+					handshakeBuffer[ipStart+1],
+					handshakeBuffer[ipStart+2],
+					handshakeBuffer[ipStart+3])
+
+				port := int(binary.BigEndian.Uint16(handshakeBuffer[portStart:portEnd]))
+
+				conn.HandshakeBuffer.Next(ipv4RequestSize)
 				if !connect.StartUpstreamConnect(conn, addr, port, false) {
 					utils.CloseConn(conn)
 					return
 				}
+
 				conn.State = data.StateConnecting
 				return
 			}
 
-			if atyp == data.AtypDomain {
-				if conn.HandshakeBuffer.Len() < 5 {
+			if addressType == data.AtypDomain {
+				domainMinSize := requestMinSize + 1
+				if conn.HandshakeBuffer.Len() < domainMinSize {
 					return
 				}
-				dlen := int(handshakeBuffer[4])
-				if conn.HandshakeBuffer.Len() < 5+dlen+2 {
-					return
-				}
-				domain := string(handshakeBuffer[5 : 5+dlen])
-				port := int(binary.BigEndian.Uint16(handshakeBuffer[5+dlen : 5+dlen+2]))
 
-				conn.HandshakeBuffer.Next(5 + dlen + 2)
+				domainLen := int(handshakeBuffer[domainLenOffset])
+				if conn.HandshakeBuffer.Len() < domainMinSize+domainLen+portSize {
+					return
+				}
+
+				domain := string(handshakeBuffer[domainStartOffset : domainStartOffset+domainLen])
+
+				portStart := domainStartOffset + domainLen
+				portEnd := portStart + portSize
+				port := int(binary.BigEndian.Uint16(handshakeBuffer[portStart:portEnd]))
+
+				conn.HandshakeBuffer.Next(domainMinSize + domainLen + portSize)
 
 				pr := &dns.PendingResolve{Conn: conn, Domain: domain, Port: port}
 				_, err := dns.SendDNSQuery(domain, pr)
@@ -100,13 +147,21 @@ func TryProcessHandshake(conn *data.Conn) {
 				return
 			}
 
-			if atyp == data.AtypIPv6 {
-				if conn.HandshakeBuffer.Len() < 4+16+2 {
+			if addressType == data.AtypIPv6 {
+				ipv6RequestSize := requestMinSize + ipv6AddrSize + portSize
+				if conn.HandshakeBuffer.Len() < ipv6RequestSize {
 					return
 				}
-				addrBytes := handshakeBuffer[4 : 4+16]
-				port := int(binary.BigEndian.Uint16(handshakeBuffer[4+16 : 4+16+2]))
-				conn.HandshakeBuffer.Next(4 + 16 + 2)
+
+				ipStart := addressTypeOffset + 1
+				ipEnd := ipStart + ipv6AddrSize
+				portStart := ipEnd
+				portEnd := portStart + portSize
+
+				addrBytes := handshakeBuffer[ipStart:ipEnd]
+				port := int(binary.BigEndian.Uint16(handshakeBuffer[portStart:portEnd]))
+
+				conn.HandshakeBuffer.Next(ipv6RequestSize)
 				addr := net.IP(addrBytes).String()
 				if !connect.StartUpstreamConnect(conn, addr, port, true) {
 					utils.CloseConn(conn)
@@ -116,7 +171,7 @@ func TryProcessHandshake(conn *data.Conn) {
 				return
 			}
 
-			utils.SendSocksReply(conn.ClientFD, data.RepAddrTypeNotSupported, atyp, nil, 0)
+			utils.SendSocksReply(conn.ClientFD, data.RepAddrTypeNotSupported, addressType, nil, 0)
 			utils.CloseConn(conn)
 			return
 		default:

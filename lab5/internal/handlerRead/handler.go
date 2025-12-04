@@ -13,15 +13,15 @@ import (
 
 func Client(conn *data.Conn) {
 	fd := conn.ClientFD
-	buf := make([]byte, 32*1024)
+	clientBuffer := make([]byte, data.HandlerBufferSize)
 	for {
-		n, err := unix.Read(fd, buf)
+		n, err := unix.Read(fd, clientBuffer)
 		if n > 0 {
 			if conn.State == data.StateGreeting || conn.State == data.StateRequest {
-				conn.HandshakeBuffer.Write(buf[:n])
+				conn.HandshakeBuffer.Write(clientBuffer[:n])
 				handshake.TryProcessHandshake(conn)
 			} else {
-				conn.ClientToUpstreamBuffer.Write(buf[:n])
+				conn.ClientToUpstreamBuffer.Write(clientBuffer[:n])
 				upStream.FlushUpstreamWrites(conn)
 			}
 		}
@@ -47,11 +47,11 @@ func Upstream(conn *data.Conn) {
 	if fd < 0 {
 		return
 	}
-	buf := make([]byte, 32*1024)
+	upStreamBuffer := make([]byte, data.HandlerBufferSize)
 	for {
-		n, err := unix.Read(fd, buf)
+		n, err := unix.Read(fd, upStreamBuffer)
 		if n > 0 {
-			conn.UpstreamToClientBuffer.Write(buf[:n])
+			conn.UpstreamToClientBuffer.Write(upStreamBuffer[:n])
 			client.FlushClientWrites(conn)
 		}
 		if err != nil {

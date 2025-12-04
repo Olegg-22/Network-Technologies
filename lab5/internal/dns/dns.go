@@ -26,89 +26,137 @@ var (
 	dnsResolverAddr     = &unix.SockaddrInet4{Port: 53, Addr: [4]byte{8, 8, 8, 8}}
 )
 
+const (
+	flags              uint16 = 0x0100 // QR=0, OPCODE=0, RD=1
+	questionsCount     uint16 = 1
+	answersCount       uint16 = 0
+	authorityRRsCount  uint16 = 0 // Authority Resource Records
+	additionalRRsCount uint16 = 0 // Additional Resource Records
+
+	limitCharInLabelLen = 63
+
+	dnsTypeA uint16 = 1
+
+	dnsClassIN uint16 = 1
+
+	dnsHeaderSize    = 12
+	dnsIDOffset      = 0
+	dnsFlagsOffset   = 2
+	dnsQDCountOffset = 4
+	dnsANCountOffset = 6
+
+	dnsQRMask    = 0x8000
+	dnsRcodeMask = 0x000F
+
+	dnsPointerMask = 0xC0
+
+	dnsAnswerMinSize = 10
+	dnsTypeClassSize = 4
+	dnsTTLSize       = 4
+	dnsIPv4Size      = 4
+
+	dnsQRResponse = 1
+
+	maxDnsID                     = 0xFFFF
+	maxRetryAttemptsForFindDnsID = 10
+
+	dnsBufferSize = 4 * 1024
+)
+
 func buildDNSQuery(id uint16, name string) ([]byte, error) {
 	dnsQuery := &bytes.Buffer{}
 	_ = binary.Write(dnsQuery, binary.BigEndian, id)
-	_ = binary.Write(dnsQuery, binary.BigEndian, uint16(0x0100))
-	_ = binary.Write(dnsQuery, binary.BigEndian, uint16(1))
-	_ = binary.Write(dnsQuery, binary.BigEndian, uint16(0))
-	_ = binary.Write(dnsQuery, binary.BigEndian, uint16(0))
-	_ = binary.Write(dnsQuery, binary.BigEndian, uint16(0))
+	_ = binary.Write(dnsQuery, binary.BigEndian, flags)
+	_ = binary.Write(dnsQuery, binary.BigEndian, questionsCount)
+	_ = binary.Write(dnsQuery, binary.BigEndian, answersCount)
+	_ = binary.Write(dnsQuery, binary.BigEndian, authorityRRsCount)
+	_ = binary.Write(dnsQuery, binary.BigEndian, additionalRRsCount)
 
 	for _, label := range bytes.Split([]byte(name), []byte{'.'}) {
-		if len(label) == 0 || len(label) > 63 {
+		if len(label) == 0 || len(label) > limitCharInLabelLen {
 			return nil, fmt.Errorf("invalid dns name")
 		}
 		dnsQuery.WriteByte(byte(len(label)))
 		dnsQuery.Write(label)
 	}
 	dnsQuery.WriteByte(0)
-	_ = binary.Write(dnsQuery, binary.BigEndian, uint16(1))
-	_ = binary.Write(dnsQuery, binary.BigEndian, uint16(1))
+	_ = binary.Write(dnsQuery, binary.BigEndian, dnsTypeA)
+	_ = binary.Write(dnsQuery, binary.BigEndian, dnsClassIN)
 	return dnsQuery.Bytes(), nil
 }
 
 func parseDNSResponse(dnsResponse []byte) (uint16, string, error) {
-	if len(dnsResponse) < 12 {
+	if len(dnsResponse) < dnsHeaderSize {
 		return 0, "", fmt.Errorf("short dns response")
 	}
-	id := binary.BigEndian.Uint16(dnsResponse[0:2])
-	flags := binary.BigEndian.Uint16(dnsResponse[2:4])
-	if (flags>>15)&1 == 0 {
+
+	id := binary.BigEndian.Uint16(dnsResponse[dnsIDOffset : dnsIDOffset+2])
+	flags := binary.BigEndian.Uint16(dnsResponse[dnsFlagsOffset : dnsFlagsOffset+2])
+
+	if (flags&dnsQRMask)>>15 != dnsQRResponse {
 		return id, "", fmt.Errorf("not a response")
 	}
-	rcode := flags & 0xF
+
+	rcode := flags & dnsRcodeMask
 	if rcode != 0 {
 		return id, "", fmt.Errorf("rcode=%d", rcode)
 	}
-	qdcount := int(binary.BigEndian.Uint16(dnsResponse[4:6]))
-	ancount := int(binary.BigEndian.Uint16(dnsResponse[6:8]))
-	off := 12
+
+	qdcount := int(binary.BigEndian.Uint16(dnsResponse[dnsQDCountOffset : dnsQDCountOffset+2]))
+	ancount := int(binary.BigEndian.Uint16(dnsResponse[dnsANCountOffset : dnsANCountOffset+2]))
+
+	offset := dnsHeaderSize
 	for i := 0; i < qdcount; i++ {
 		for {
-			if off >= len(dnsResponse) {
+			if offset >= len(dnsResponse) {
 				return id, "", fmt.Errorf("uncorrect response")
 			}
-			l := int(dnsResponse[off])
-			off++
-			if l == 0 {
+			labelLength := int(dnsResponse[offset])
+			offset++
+			if labelLength == 0 {
 				break
 			}
-			off += l
+			offset += labelLength
 		}
-		off += 4
+		offset += dnsTypeClassSize
 	}
+
 	for i := 0; i < ancount; i++ {
-		if off+10 > len(dnsResponse) {
+		if offset+dnsAnswerMinSize > len(dnsResponse) {
 			return id, "", fmt.Errorf("short answer")
 		}
-		if dnsResponse[off]&0xC0 == 0xC0 {
-			off += 2
+		if dnsResponse[offset]&dnsPointerMask == dnsPointerMask {
+			offset += 2
 		} else {
 			for {
-				if off >= len(dnsResponse) {
+				if offset >= len(dnsResponse) {
 					return id, "", fmt.Errorf("uncorrect answer name")
 				}
-				l := int(dnsResponse[off])
-				off++
-				if l == 0 {
+				labelLength := int(dnsResponse[offset])
+				offset++
+				if labelLength == 0 {
 					break
 				}
-				off += l
+				offset += labelLength
 			}
 		}
-		typ := binary.BigEndian.Uint16(dnsResponse[off : off+2])
-		off += 2
-		class := binary.BigEndian.Uint16(dnsResponse[off : off+2])
-		off += 2 + 4
-		rdlen := int(binary.BigEndian.Uint16(dnsResponse[off : off+2]))
-		off += 2
-		if off+rdlen > len(dnsResponse) {
+		typ := binary.BigEndian.Uint16(dnsResponse[offset : offset+2])
+		offset += 2
+
+		class := binary.BigEndian.Uint16(dnsResponse[offset : offset+2])
+		offset += 2
+
+		offset += dnsTTLSize
+
+		rdlen := int(binary.BigEndian.Uint16(dnsResponse[offset : offset+2]))
+		offset += 2
+
+		if offset+rdlen > len(dnsResponse) {
 			return id, "", fmt.Errorf("rdata out of bounds")
 		}
-		rdata := dnsResponse[off : off+rdlen]
-		off += rdlen
-		if typ == 1 && class == 1 && rdlen == 4 {
+		rdata := dnsResponse[offset : offset+rdlen]
+		offset += rdlen
+		if typ == dnsTypeA && class == dnsClassIN && rdlen == dnsIPv4Size {
 			ip := net.IPv4(rdata[0], rdata[1], rdata[2], rdata[3]).String()
 			return id, ip, nil
 		}
@@ -118,12 +166,12 @@ func parseDNSResponse(dnsResponse []byte) (uint16, string, error) {
 
 func SendDNSQuery(domain string, p *PendingResolve) (uint16, error) {
 	var id uint16
-	for tries := 0; tries < 10; tries++ {
-		id = uint16(rand.Intn(0xffff))
+	for tries := 0; tries < maxRetryAttemptsForFindDnsID; tries++ {
+		id = uint16(rand.Intn(maxDnsID))
 		if _, exists := pendingResolves[id]; !exists {
 			break
 		}
-		if tries == 9 {
+		if tries == maxRetryAttemptsForFindDnsID-1 {
 			return 0, fmt.Errorf("faile to find free dns id")
 		}
 	}
@@ -142,9 +190,9 @@ func SendDNSQuery(domain string, p *PendingResolve) (uint16, error) {
 }
 
 func HandleDNSRead() {
-	buf := make([]byte, 4*1024)
+	dnsBuffer := make([]byte, dnsBufferSize)
 	for {
-		n, _, err := unix.Recvfrom(FD, buf, 0)
+		n, _, err := unix.Recvfrom(FD, dnsBuffer, 0)
 		if err != nil {
 			if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
 				return
@@ -156,9 +204,9 @@ func HandleDNSRead() {
 			return
 		}
 
-		id, ipStr, err := parseDNSResponse(buf[:n])
+		id, ipStr, err := parseDNSResponse(dnsBuffer[:n])
 		if err != nil {
-			//fmt.Printf("dns parse err: %v\n", err)
+			fmt.Printf("dns parse err: %v\n", err)
 			continue
 		}
 

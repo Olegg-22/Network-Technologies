@@ -10,17 +10,13 @@ import (
 	"lab5/internal/handlerWrite"
 	"lab5/internal/utils"
 	"log"
-	"math/rand"
 	"os"
 	"strconv"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
 
 func Controller() {
-	rand.Seed(time.Now().UnixNano())
-
 	if len(os.Args) != 2 {
 		fmt.Println("Usage: go run ./main.go <port>")
 		return
@@ -54,7 +50,7 @@ func Controller() {
 		fmt.Printf("bind faile: %v\n", err)
 		return
 	}
-	if err := unix.Listen(lnFD, 128); err != nil {
+	if err := unix.Listen(lnFD, data.MaxLenQueueListen); err != nil {
 		fmt.Printf("listen faile: %v\n", err)
 		return
 	}
@@ -99,7 +95,7 @@ func Controller() {
 		return
 	}
 
-	events := make([]unix.EpollEvent, 128)
+	events := make([]unix.EpollEvent, data.MaxLenQueueListen)
 	for {
 		n, err := unix.EpollWait(data.Epfd, events, -1)
 		if err != nil {

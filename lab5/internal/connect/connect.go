@@ -39,13 +39,13 @@ func AcceptLoop(ln int) {
 }
 
 func StartUpstreamConnect(conn *data.Conn, addr string, port int, isIPv6 bool) bool {
-	var upfd int
+	var upstreamFd int
 	var err error
 
 	if isIPv6 {
-		upfd, err = unix.Socket(unix.AF_INET6, unix.SOCK_STREAM, 0)
+		upstreamFd, err = unix.Socket(unix.AF_INET6, unix.SOCK_STREAM, 0)
 	} else {
-		upfd, err = unix.Socket(unix.AF_INET, unix.SOCK_STREAM, 0)
+		upstreamFd, err = unix.Socket(unix.AF_INET, unix.SOCK_STREAM, 0)
 	}
 
 	if err != nil {
@@ -53,26 +53,26 @@ func StartUpstreamConnect(conn *data.Conn, addr string, port int, isIPv6 bool) b
 		return false
 	}
 
-	conn.UpstreamFD = upfd
-	data.FdsInfo[upfd] = &data.FDInfo{Conn: conn, IsClient: false}
+	conn.UpstreamFD = upstreamFd
+	data.FdsInfo[upstreamFd] = &data.FDInfo{Conn: conn, IsClient: false}
 
-	if err = unix.SetNonblock(upfd, true); err != nil {
-		err = unix.Close(upfd)
+	if err = unix.SetNonblock(upstreamFd, true); err != nil {
+		err = unix.Close(upstreamFd)
 		if err != nil {
-			log.Printf("close(%d) faile: %v", upfd, err)
+			log.Printf("close(%d) faile: %v", upstreamFd, err)
 		}
-		delete(data.FdsInfo, upfd)
+		delete(data.FdsInfo, upstreamFd)
 		conn.UpstreamFD = -1
 		utils.SendSocksReply(conn.ClientFD, data.RepGeneralFailure, data.AtypIPv4, nil, 0)
 		return false
 	}
 
-	if err = utils.EpollAdd(upfd, unix.EPOLLOUT); err != nil {
-		err = unix.Close(upfd)
+	if err = utils.EpollAdd(upstreamFd, unix.EPOLLOUT); err != nil {
+		err = unix.Close(upstreamFd)
 		if err != nil {
-			log.Printf("close(%d) faile: %v", upfd, err)
+			log.Printf("close(%d) faile: %v", upstreamFd, err)
 		}
-		delete(data.FdsInfo, upfd)
+		delete(data.FdsInfo, upstreamFd)
 		conn.UpstreamFD = -1
 		utils.SendSocksReply(conn.ClientFD, data.RepGeneralFailure, data.AtypIPv4, nil, 0)
 		return false
@@ -81,12 +81,12 @@ func StartUpstreamConnect(conn *data.Conn, addr string, port int, isIPv6 bool) b
 	if isIPv6 {
 		ip6 := net.ParseIP(addr).To16()
 		if ip6 == nil {
-			utils.EpollDel(upfd)
-			err = unix.Close(upfd)
+			utils.EpollDel(upstreamFd)
+			err = unix.Close(upstreamFd)
 			if err != nil {
-				log.Printf("close(%d) faile: %v", upfd, err)
+				log.Printf("close(%d) faile: %v", upstreamFd, err)
 			}
-			delete(data.FdsInfo, upfd)
+			delete(data.FdsInfo, upstreamFd)
 			conn.UpstreamFD = -1
 			utils.SendSocksReply(conn.ClientFD, data.RepGeneralFailure, data.AtypIPv6, nil, 0)
 			return false
@@ -94,16 +94,16 @@ func StartUpstreamConnect(conn *data.Conn, addr string, port int, isIPv6 bool) b
 		var sa unix.SockaddrInet6
 		copy(sa.Addr[:], ip6)
 		sa.Port = port
-		if err = unix.Connect(upfd, &sa); err != nil {
+		if err = unix.Connect(upstreamFd, &sa); err != nil {
 			if errors.Is(err, unix.EINPROGRESS) || errors.Is(err, unix.EALREADY) {
 				return true
 			}
-			utils.EpollDel(upfd)
-			err = unix.Close(upfd)
+			utils.EpollDel(upstreamFd)
+			err = unix.Close(upstreamFd)
 			if err != nil {
-				log.Printf("close(%d) faile: %v", upfd, err)
+				log.Printf("close(%d) faile: %v", upstreamFd, err)
 			}
-			delete(data.FdsInfo, upfd)
+			delete(data.FdsInfo, upstreamFd)
 			conn.UpstreamFD = -1
 			utils.SendSocksReply(conn.ClientFD, data.RepGeneralFailure, data.AtypIPv6, nil, 0)
 			return false
@@ -114,16 +114,16 @@ func StartUpstreamConnect(conn *data.Conn, addr string, port int, isIPv6 bool) b
 		var sa unix.SockaddrInet4
 		copy(sa.Addr[:], utils.ParseIPv4(addr)[:])
 		sa.Port = port
-		if err = unix.Connect(upfd, &sa); err != nil {
+		if err = unix.Connect(upstreamFd, &sa); err != nil {
 			if errors.Is(err, unix.EINPROGRESS) || errors.Is(err, unix.EALREADY) {
 				return true
 			}
-			utils.EpollDel(upfd)
-			err = unix.Close(upfd)
+			utils.EpollDel(upstreamFd)
+			err = unix.Close(upstreamFd)
 			if err != nil {
-				log.Printf("close(%d) faile: %v", upfd, err)
+				log.Printf("close(%d) faile: %v", upstreamFd, err)
 			}
-			delete(data.FdsInfo, upfd)
+			delete(data.FdsInfo, upstreamFd)
 			conn.UpstreamFD = -1
 			utils.SendSocksReply(conn.ClientFD, data.RepGeneralFailure, data.AtypIPv4, nil, 0)
 			return false

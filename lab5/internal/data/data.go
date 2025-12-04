@@ -3,11 +3,9 @@ package data
 import "bytes"
 
 const (
-	SocksVer = 0x05
-
+	SocksVer          = 0x05
 	SocksMethodNoAuth = 0x00
-
-	SocksCmdConnect = 0x01
+	SocksCmdConnect   = 0x01
 
 	AtypIPv4   = 0x01
 	AtypDomain = 0x03
@@ -17,6 +15,10 @@ const (
 	RepGeneralFailure       = 0x01
 	RepCommandNotSupported  = 0x07
 	RepAddrTypeNotSupported = 0x08
+
+	MaxLenQueueListen = 128
+
+	HandlerBufferSize = 32 * 1024
 )
 
 const (
