@@ -19,6 +19,15 @@ func EpollMod(fd int, events uint32) error {
 }
 func EpollDel(fd int) { _ = unix.EpollCtl(data.Epfd, unix.EPOLL_CTL_DEL, fd, nil) }
 
+func CleanupAllConnections() {
+	for fd, info := range data.FdsInfo {
+		if info != nil && info.Conn != nil {
+			CloseConn(info.Conn)
+		}
+		delete(data.FdsInfo, fd)
+	}
+}
+
 func CloseConn(conn *data.Conn) {
 	if conn == nil {
 		return

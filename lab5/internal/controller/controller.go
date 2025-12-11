@@ -19,18 +19,18 @@ import (
 func Controller() {
 	if len(os.Args) != 2 {
 		fmt.Println("Usage: go run ./main.go <port>")
-		return
+		os.Exit(1)
 	}
 	port, err := strconv.Atoi(os.Args[1])
 	if err != nil {
 		fmt.Printf("invalid port: %v\n", err)
-		return
+		os.Exit(1)
 	}
 
 	lnFD, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM, 0)
 	if err != nil {
 		fmt.Printf("socket faile: %v\n", err)
-		return
+		os.Exit(1)
 	}
 	defer func(fd int) {
 		err := unix.Close(fd)
@@ -42,24 +42,24 @@ func Controller() {
 	_ = unix.SetsockoptInt(lnFD, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
 	if err := unix.SetNonblock(lnFD, true); err != nil {
 		fmt.Printf("setnonblock faile: %v\n", err)
-		return
+		os.Exit(1)
 	}
 	sa := &unix.SockaddrInet4{Port: port}
 	copy(sa.Addr[:], []byte{0, 0, 0, 0})
 	if err := unix.Bind(lnFD, sa); err != nil {
 		fmt.Printf("bind faile: %v\n", err)
-		return
+		os.Exit(1)
 	}
 	if err := unix.Listen(lnFD, data.MaxLenQueueListen); err != nil {
 		fmt.Printf("listen faile: %v\n", err)
-		return
+		os.Exit(1)
 	}
 	fmt.Printf("listening on :%d\n", port)
 
 	data.Epfd, err = unix.EpollCreate1(0)
 	if err != nil {
 		fmt.Printf("epoll_create1 faile: %v\n", err)
-		return
+		os.Exit(1)
 	}
 	defer func(fd int) {
 		err := unix.Close(fd)
@@ -70,13 +70,13 @@ func Controller() {
 
 	if err := utils.EpollAdd(lnFD, unix.EPOLLIN); err != nil {
 		fmt.Printf("epoll add listen faile: %v\n", err)
-		return
+		os.Exit(1)
 	}
 
 	dns.FD, err = unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
 	if err != nil {
 		fmt.Printf("dns socket faile: %v\n", err)
-		return
+		os.Exit(1)
 	}
 	defer func(fd int) {
 		if fd > 0 {
@@ -88,11 +88,12 @@ func Controller() {
 	}(dns.FD)
 	if err := unix.SetNonblock(dns.FD, true); err != nil {
 		fmt.Printf("dns setnonblock faile: %v\n", err)
-		return
+		os.Exit(1)
+
 	}
 	if err := utils.EpollAdd(dns.FD, unix.EPOLLIN); err != nil {
 		fmt.Printf("epoll add dns faile: %v\n", err)
-		return
+		os.Exit(1)
 	}
 
 	events := make([]unix.EpollEvent, data.MaxLenQueueListen)
@@ -103,6 +104,7 @@ func Controller() {
 				continue
 			}
 			fmt.Printf("epoll_wait: %v\n", err)
+			utils.CleanupAllConnections()
 			return
 		}
 		for i := 0; i < n; i++ {

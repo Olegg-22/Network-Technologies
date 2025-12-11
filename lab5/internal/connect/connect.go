@@ -49,7 +49,13 @@ func StartUpstreamConnect(conn *data.Conn, addr string, port int, isIPv6 bool) b
 	}
 
 	if err != nil {
-		utils.SendSocksReply(conn.ClientFD, data.RepGeneralFailure, data.AtypIPv4, nil, 0)
+		var atyp byte
+		if isIPv6 {
+			atyp = data.AtypIPv6
+		} else {
+			atyp = data.AtypIPv4
+		}
+		utils.SendSocksReply(conn.ClientFD, data.RepGeneralFailure, atyp, nil, 0)
 		return false
 	}
 
