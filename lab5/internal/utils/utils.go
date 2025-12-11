@@ -3,7 +3,6 @@ package utils
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"lab5/internal/data"
 	"log"
 
@@ -19,15 +18,6 @@ func EpollMod(fd int, events uint32) error {
 	return unix.EpollCtl(data.Epfd, unix.EPOLL_CTL_MOD, fd, ev)
 }
 func EpollDel(fd int) { _ = unix.EpollCtl(data.Epfd, unix.EPOLL_CTL_DEL, fd, nil) }
-
-func ParseIPv4(s string) []byte {
-	var a, b, c, d int
-	_, err := fmt.Sscanf(s, "%d.%d.%d.%d", &a, &b, &c, &d)
-	if err != nil {
-		log.Printf("sscanf faile: %v", err)
-	}
-	return []byte{byte(a), byte(b), byte(c), byte(d)}
-}
 
 func CloseConn(conn *data.Conn) {
 	if conn == nil {

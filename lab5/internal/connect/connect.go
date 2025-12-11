@@ -78,57 +78,66 @@ func StartUpstreamConnect(conn *data.Conn, addr string, port int, isIPv6 bool) b
 		return false
 	}
 
+	var ipAddr []byte
 	if isIPv6 {
-		ip6 := net.ParseIP(addr).To16()
-		if ip6 == nil {
-			utils.EpollDel(upstreamFd)
-			err = unix.Close(upstreamFd)
-			if err != nil {
-				log.Printf("close(%d) faile: %v", upstreamFd, err)
-			}
-			delete(data.FdsInfo, upstreamFd)
-			conn.UpstreamFD = -1
-			utils.SendSocksReply(conn.ClientFD, data.RepGeneralFailure, data.AtypIPv6, nil, 0)
-			return false
-		}
-		var sa unix.SockaddrInet6
-		copy(sa.Addr[:], ip6)
-		sa.Port = port
-		if err = unix.Connect(upstreamFd, &sa); err != nil {
-			if errors.Is(err, unix.EINPROGRESS) || errors.Is(err, unix.EALREADY) {
-				return true
-			}
-			utils.EpollDel(upstreamFd)
-			err = unix.Close(upstreamFd)
-			if err != nil {
-				log.Printf("close(%d) faile: %v", upstreamFd, err)
-			}
-			delete(data.FdsInfo, upstreamFd)
-			conn.UpstreamFD = -1
-			utils.SendSocksReply(conn.ClientFD, data.RepGeneralFailure, data.AtypIPv6, nil, 0)
-			return false
-		}
-		handlerWrite.Upstream(conn)
-		return true
+		ipAddr = net.ParseIP(addr).To16()
 	} else {
-		var sa unix.SockaddrInet4
-		copy(sa.Addr[:], utils.ParseIPv4(addr)[:])
-		sa.Port = port
-		if err = unix.Connect(upstreamFd, &sa); err != nil {
-			if errors.Is(err, unix.EINPROGRESS) || errors.Is(err, unix.EALREADY) {
-				return true
-			}
-			utils.EpollDel(upstreamFd)
-			err = unix.Close(upstreamFd)
-			if err != nil {
-				log.Printf("close(%d) faile: %v", upstreamFd, err)
-			}
-			delete(data.FdsInfo, upstreamFd)
-			conn.UpstreamFD = -1
-			utils.SendSocksReply(conn.ClientFD, data.RepGeneralFailure, data.AtypIPv4, nil, 0)
-			return false
-		}
-		handlerWrite.Upstream(conn)
-		return true
+		ipAddr = net.ParseIP(addr).To4()
 	}
+
+	if ipAddr == nil {
+		utils.EpollDel(upstreamFd)
+		err = unix.Close(upstreamFd)
+		if err != nil {
+			log.Printf("close(%d) faile: %v", upstreamFd, err)
+		}
+		delete(data.FdsInfo, upstreamFd)
+		conn.UpstreamFD = -1
+		var atyp byte
+		if isIPv6 {
+			atyp = data.AtypIPv6
+		} else {
+			atyp = data.AtypIPv4
+		}
+		utils.SendSocksReply(conn.ClientFD, data.RepGeneralFailure, atyp, nil, 0)
+		return false
+	}
+
+	var sa unix.Sockaddr
+	if isIPv6 {
+		sa6 := &unix.SockaddrInet6{
+			Port: port,
+		}
+		copy(sa6.Addr[:], ipAddr)
+		sa = sa6
+	} else {
+		sa4 := &unix.SockaddrInet4{
+			Port: port,
+		}
+		copy(sa4.Addr[:], ipAddr)
+		sa = sa4
+	}
+
+	if err = unix.Connect(upstreamFd, sa); err != nil {
+		if errors.Is(err, unix.EINPROGRESS) || errors.Is(err, unix.EALREADY) {
+			return true
+		}
+		utils.EpollDel(upstreamFd)
+		err = unix.Close(upstreamFd)
+		if err != nil {
+			log.Printf("close(%d) faile: %v", upstreamFd, err)
+		}
+		delete(data.FdsInfo, upstreamFd)
+		conn.UpstreamFD = -1
+		var atyp byte
+		if isIPv6 {
+			atyp = data.AtypIPv6
+		} else {
+			atyp = data.AtypIPv4
+		}
+		utils.SendSocksReply(conn.ClientFD, data.RepGeneralFailure, atyp, nil, 0)
+		return false
+	}
+	handlerWrite.Upstream(conn)
+	return true
 }

@@ -18,6 +18,6 @@
 ## Запуск
 
 ```bash
-go run main.go <port>
+go run ./main.go <port>
 ```
 Где port - порт для прослушивания входящих соединений.
