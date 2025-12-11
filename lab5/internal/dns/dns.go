@@ -18,6 +18,7 @@ type PendingResolve struct {
 	Conn   *data.Conn
 	Domain string
 	Port   int
+	IsIPv6 bool
 }
 
 var (
@@ -35,7 +36,8 @@ const (
 
 	limitCharInLabelLen = 63
 
-	dnsTypeA uint16 = 1
+	dnsTypeA    uint16 = 1
+	dnsTypeAAAA uint16 = 28
 
 	dnsClassIN uint16 = 1
 
@@ -54,6 +56,7 @@ const (
 	dnsTypeClassSize = 4
 	dnsTTLSize       = 4
 	dnsIPv4Size      = 4
+	dnsIPv6Size      = 16
 
 	dnsQRResponse = 1
 
@@ -63,7 +66,7 @@ const (
 	dnsBufferSize = 4 * 1024
 )
 
-func buildDNSQuery(id uint16, name string) ([]byte, error) {
+func buildDNSQuery(id uint16, name string, isIPv6 bool) ([]byte, error) {
 	dnsQuery := &bytes.Buffer{}
 	_ = binary.Write(dnsQuery, binary.BigEndian, id)
 	_ = binary.Write(dnsQuery, binary.BigEndian, flags)
@@ -80,12 +83,18 @@ func buildDNSQuery(id uint16, name string) ([]byte, error) {
 		dnsQuery.Write(label)
 	}
 	dnsQuery.WriteByte(0)
-	_ = binary.Write(dnsQuery, binary.BigEndian, dnsTypeA)
+	var queryType uint16
+	if isIPv6 {
+		queryType = dnsTypeAAAA
+	} else {
+		queryType = dnsTypeA
+	}
+	_ = binary.Write(dnsQuery, binary.BigEndian, queryType)
 	_ = binary.Write(dnsQuery, binary.BigEndian, dnsClassIN)
 	return dnsQuery.Bytes(), nil
 }
 
-func parseDNSResponse(dnsResponse []byte) (uint16, string, error) {
+func parseDNSResponse(dnsResponse []byte, isIPv6 bool) (uint16, string, error) {
 	if len(dnsResponse) < dnsHeaderSize {
 		return 0, "", fmt.Errorf("short dns response")
 	}
@@ -119,6 +128,16 @@ func parseDNSResponse(dnsResponse []byte) (uint16, string, error) {
 			offset += labelLength
 		}
 		offset += dnsTypeClassSize
+	}
+
+	var expectedType uint16
+	var expectedSize int
+	if isIPv6 {
+		expectedType = dnsTypeAAAA
+		expectedSize = dnsIPv6Size
+	} else {
+		expectedType = dnsTypeA
+		expectedSize = dnsIPv4Size
 	}
 
 	for i := 0; i < ancount; i++ {
@@ -156,12 +175,25 @@ func parseDNSResponse(dnsResponse []byte) (uint16, string, error) {
 		}
 		rdata := dnsResponse[offset : offset+rdlen]
 		offset += rdlen
-		if typ == dnsTypeA && class == dnsClassIN && rdlen == dnsIPv4Size {
-			ip := net.IPv4(rdata[0], rdata[1], rdata[2], rdata[3]).String()
-			return id, ip, nil
+
+		if typ == expectedType && class == dnsClassIN && rdlen == expectedSize {
+			var ip string
+			if isIPv6 {
+				if len(rdata) == dnsIPv6Size {
+					ip = net.IP(rdata).String()
+				}
+			} else {
+				if len(rdata) == dnsIPv4Size {
+					ip = net.IPv4(rdata[0], rdata[1], rdata[2], rdata[3]).String()
+				}
+			}
+
+			if ip != "" {
+				return id, ip, nil
+			}
 		}
 	}
-	return id, "", fmt.Errorf("no A record found")
+	return id, "", fmt.Errorf("no record found")
 }
 
 func SendDNSQuery(domain string, p *PendingResolve) (uint16, error) {
@@ -176,7 +208,7 @@ func SendDNSQuery(domain string, p *PendingResolve) (uint16, error) {
 		}
 	}
 
-	dnsQuery, err := buildDNSQuery(id, domain)
+	dnsQuery, err := buildDNSQuery(id, domain, p.IsIPv6)
 	if err != nil {
 		return 0, err
 	}
@@ -204,10 +236,17 @@ func HandleDNSRead() {
 			return
 		}
 
-		id, ipStr, err := parseDNSResponse(dnsBuffer[:n])
+		id, ipStr, err := parseDNSResponse(dnsBuffer[:n], false)
 		if err != nil {
-			fmt.Printf("dns parse err: %v\n", err)
-			continue
+			pendingRequest := pendingResolves[id]
+			if pendingRequest != nil {
+				id, ipStr, err = parseDNSResponse(dnsBuffer[:n], pendingRequest.IsIPv6)
+			}
+
+			if err != nil {
+				fmt.Printf("dns parse err: %v\n", err)
+				continue
+			}
 		}
 
 		pendingRequest := pendingResolves[id]
@@ -222,10 +261,7 @@ func HandleDNSRead() {
 			utils.CloseConn(pendingRequest.Conn)
 			continue
 		}
-		isIPv6 := false
-		if ip.To4() == nil {
-			isIPv6 = true
-		}
+		isIPv6 := pendingRequest.IsIPv6
 
 		if !connect.StartUpstreamConnect(pendingRequest.Conn, ipStr, pendingRequest.Port, isIPv6) {
 			utils.CloseConn(pendingRequest.Conn)
