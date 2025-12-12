@@ -7,6 +7,7 @@ import (
 	"lab5/internal/handshake"
 	"lab5/internal/upStream"
 	"lab5/internal/utils"
+	"log"
 
 	"golang.org/x/sys/unix"
 )
@@ -17,6 +18,14 @@ func Client(conn *data.Conn) {
 	for {
 		n, err := unix.Read(fd, clientBuffer)
 		if n > 0 {
+			totalBufferSize := conn.ClientToUpstreamBuffer.Len() + n
+
+			if totalBufferSize > data.MaxBufferSizeForClient {
+				log.Printf("Buffer overflow, closing connection: clientFD=%d", conn.ClientFD)
+				utils.CloseConn(conn)
+				return
+			}
+
 			if conn.State == data.StateGreeting || conn.State == data.StateRequest {
 				conn.HandshakeBuffer.Write(clientBuffer[:n])
 				handshake.TryProcessHandshake(conn)

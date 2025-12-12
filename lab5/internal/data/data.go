@@ -19,6 +19,8 @@ const (
 	MaxLenQueueListen = 128
 
 	HandlerBufferSize = 32 * 1024
+
+	MaxBufferSizeForClient = 8 * 1024 * 1024
 )
 
 const (

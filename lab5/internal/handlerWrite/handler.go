@@ -21,23 +21,23 @@ func Upstream(conn *data.Conn) {
 	if conn.State == data.StateConnecting {
 		soErr, err := unix.GetsockoptInt(upfd, unix.SOL_SOCKET, unix.SO_ERROR)
 		if err != nil || soErr != 0 {
-			utils.SendSocksReply(conn.ClientFD, data.RepGeneralFailure, data.AtypIPv4, nil, 0)
+			utils.SendSocksReply(conn, data.RepGeneralFailure, data.AtypIPv4, nil, 0)
 			utils.CloseConn(conn)
 			return
 		}
 		sa, err := unix.Getsockname(conn.UpstreamFD)
 		if err != nil {
-			utils.SendSocksReply(conn.ClientFD, data.RepGeneralFailure, data.AtypIPv4, nil, 0)
+			utils.SendSocksReply(conn, data.RepGeneralFailure, data.AtypIPv4, nil, 0)
 			utils.CloseConn(conn)
 			return
 		}
 		if _, isIPv6 := sa.(*unix.SockaddrInet6); isIPv6 {
-			if !utils.SendSocksReply(conn.ClientFD, data.RepSuccess, data.AtypIPv6, make([]byte, 16), 0) {
+			if !utils.SendSocksReply(conn, data.RepSuccess, data.AtypIPv6, make([]byte, 16), 0) {
 				utils.CloseConn(conn)
 				return
 			}
 		} else {
-			if !utils.SendSocksReply(conn.ClientFD, data.RepSuccess, data.AtypIPv4, []byte{0, 0, 0, 0}, 0) {
+			if !utils.SendSocksReply(conn, data.RepSuccess, data.AtypIPv4, []byte{0, 0, 0, 0}, 0) {
 				utils.CloseConn(conn)
 				return
 			}

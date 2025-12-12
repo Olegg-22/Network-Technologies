@@ -53,7 +53,7 @@ func CloseConn(conn *data.Conn) {
 	}
 }
 
-func SendSocksReply(clientFD int, rep byte, atyp byte, bndAddr []byte, bndPort int) bool {
+func SendSocksReply(conn *data.Conn, rep byte, atyp byte, bndAddr []byte, bndPort int) bool {
 	if bndAddr == nil {
 		bndAddr = []byte{0, 0, 0, 0}
 	}
@@ -62,10 +62,10 @@ func SendSocksReply(clientFD int, rep byte, atyp byte, bndAddr []byte, bndPort i
 	portb := make([]byte, 2)
 	binary.BigEndian.PutUint16(portb, uint16(bndPort))
 	resp = append(resp, portb...)
-	return WriteAll(clientFD, resp)
+	return WriteAll(conn, conn.ClientFD, resp, false)
 }
 
-func WriteAll(fd int, data []byte) bool {
+func WriteAll(conn *data.Conn, fd int, data []byte, isClientToUpstream bool) bool {
 	off := 0
 	for off < len(data) {
 		n, err := unix.Write(fd, data[off:])
@@ -74,7 +74,16 @@ func WriteAll(fd int, data []byte) bool {
 		}
 		if err != nil {
 			if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
-				return false
+				if off < len(data) {
+					remaining := data[off:]
+					if isClientToUpstream {
+						conn.ClientToUpstreamBuffer.Write(remaining)
+					} else {
+						conn.UpstreamToClientBuffer.Write(remaining)
+					}
+					_ = EpollMod(fd, unix.EPOLLIN|unix.EPOLLOUT)
+				}
+				return true
 			}
 			return false
 		}

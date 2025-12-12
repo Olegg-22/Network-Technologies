@@ -55,7 +55,7 @@ func StartUpstreamConnect(conn *data.Conn, addr string, port int, isIPv6 bool) b
 		} else {
 			atyp = data.AtypIPv4
 		}
-		utils.SendSocksReply(conn.ClientFD, data.RepGeneralFailure, atyp, nil, 0)
+		utils.SendSocksReply(conn, data.RepGeneralFailure, atyp, nil, 0)
 		return false
 	}
 
@@ -69,7 +69,7 @@ func StartUpstreamConnect(conn *data.Conn, addr string, port int, isIPv6 bool) b
 		}
 		delete(data.FdsInfo, upstreamFd)
 		conn.UpstreamFD = -1
-		utils.SendSocksReply(conn.ClientFD, data.RepGeneralFailure, data.AtypIPv4, nil, 0)
+		utils.SendSocksReply(conn, data.RepGeneralFailure, data.AtypIPv4, nil, 0)
 		return false
 	}
 
@@ -80,7 +80,7 @@ func StartUpstreamConnect(conn *data.Conn, addr string, port int, isIPv6 bool) b
 		}
 		delete(data.FdsInfo, upstreamFd)
 		conn.UpstreamFD = -1
-		utils.SendSocksReply(conn.ClientFD, data.RepGeneralFailure, data.AtypIPv4, nil, 0)
+		utils.SendSocksReply(conn, data.RepGeneralFailure, data.AtypIPv4, nil, 0)
 		return false
 	}
 
@@ -105,7 +105,7 @@ func StartUpstreamConnect(conn *data.Conn, addr string, port int, isIPv6 bool) b
 		} else {
 			atyp = data.AtypIPv4
 		}
-		utils.SendSocksReply(conn.ClientFD, data.RepGeneralFailure, atyp, nil, 0)
+		utils.SendSocksReply(conn, data.RepGeneralFailure, atyp, nil, 0)
 		return false
 	}
 
@@ -141,7 +141,7 @@ func StartUpstreamConnect(conn *data.Conn, addr string, port int, isIPv6 bool) b
 		} else {
 			atyp = data.AtypIPv4
 		}
-		utils.SendSocksReply(conn.ClientFD, data.RepGeneralFailure, atyp, nil, 0)
+		utils.SendSocksReply(conn, data.RepGeneralFailure, atyp, nil, 0)
 		return false
 	}
 	handlerWrite.Upstream(conn)

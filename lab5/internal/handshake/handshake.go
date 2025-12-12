@@ -58,7 +58,7 @@ func TryProcessHandshake(conn *data.Conn) {
 			}
 			conn.HandshakeBuffer.Next(greetingHeaderSize + methodsCount)
 
-			if !utils.WriteAll(conn.ClientFD, []byte{data.SocksVer, data.SocksMethodNoAuth}) {
+			if !utils.WriteAll(conn, conn.ClientFD, []byte{data.SocksVer, data.SocksMethodNoAuth}, false) {
 				utils.CloseConn(conn)
 				return
 			}
@@ -85,7 +85,7 @@ func TryProcessHandshake(conn *data.Conn) {
 			addressType := handshakeBuffer[addressTypeOffset]
 
 			if command != data.SocksCmdConnect {
-				utils.SendSocksReply(conn.ClientFD, data.RepCommandNotSupported, addressType, nil, 0)
+				utils.SendSocksReply(conn, data.RepCommandNotSupported, addressType, nil, 0)
 				utils.CloseConn(conn)
 				return
 			}
@@ -139,7 +139,7 @@ func TryProcessHandshake(conn *data.Conn) {
 				pr := &dns.PendingResolve{Conn: conn, Domain: domain, Port: port}
 				_, err := dns.SendDNSQuery(domain, pr)
 				if err != nil {
-					utils.SendSocksReply(conn.ClientFD, data.RepGeneralFailure, data.AtypDomain, nil, 0)
+					utils.SendSocksReply(conn, data.RepGeneralFailure, data.AtypDomain, nil, 0)
 					utils.CloseConn(conn)
 					return
 				}
@@ -171,7 +171,7 @@ func TryProcessHandshake(conn *data.Conn) {
 				return
 			}
 
-			utils.SendSocksReply(conn.ClientFD, data.RepAddrTypeNotSupported, addressType, nil, 0)
+			utils.SendSocksReply(conn, data.RepAddrTypeNotSupported, addressType, nil, 0)
 			utils.CloseConn(conn)
 			return
 		default:

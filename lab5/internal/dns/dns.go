@@ -257,7 +257,7 @@ func HandleDNSRead() {
 
 		ip := net.ParseIP(ipStr)
 		if ip == nil {
-			utils.SendSocksReply(pendingRequest.Conn.ClientFD, data.RepGeneralFailure, data.AtypDomain, nil, 0)
+			utils.SendSocksReply(pendingRequest.Conn, data.RepGeneralFailure, data.AtypDomain, nil, 0)
 			utils.CloseConn(pendingRequest.Conn)
 			continue
 		}
